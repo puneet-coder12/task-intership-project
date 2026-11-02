@@ -6,19 +6,35 @@ const tasks = require('./routes/tasks');
 
 const { PORT = 5000, MONGODB_URI, CLIENT_ORIGIN = 'http://localhost:5173' } = process.env;
 
-if (!MONGODB_URI) {
-  console.error('Missing MONGODB_URI. Copy server/.env.example to server/.env and set it.');
-  process.exit(1);
-}
-
 const app = express();
 app.use(cors({ origin: CLIENT_ORIGIN.split(',').map((s) => s.trim()) }));
 app.use(express.json());
 
+// Connect lazily and reuse the connection (needed for serverless)
+let connection;
+function connectDB() {
+  if (!MONGODB_URI) throw new Error('Missing MONGODB_URI');
+  if (!connection) {
+    connection = mongoose.connect(MONGODB_URI).catch((err) => {
+      connection = null;
+      throw err;
+    });
+  }
+  return connection;
+}
+app.use(async (_req, _res, next) => {
+  try {
+    await connectDB();
+    next();
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.get('/', (_req, res) => res.json({ ok: true, name: 'taskboard api' }));
 app.get('/api/health', (_req, res) => res.json({ ok: true }));
 app.use('/api/tasks', tasks);
 
-// Central error handler: validation / bad id => 400, everything else => 500
 app.use((err, _req, res, _next) => {
   if (err.name === 'ValidationError') {
     return res.status(400).json({ message: Object.values(err.errors).map((e) => e.message).join(', ') });
@@ -28,13 +44,9 @@ app.use((err, _req, res, _next) => {
   res.status(500).json({ message: 'Something went wrong on the server' });
 });
 
-mongoose
-  .connect(MONGODB_URI)
-  .then(() => {
-    console.log('MongoDB connected');
-    app.listen(PORT, () => console.log(`API running on http://localhost:${PORT}`));
-  })
-  .catch((err) => {
-    console.error('MongoDB connection failed:', err.message);
-    process.exit(1);
-  });
+module.exports = app;
+
+// Only start a listener when running locally (npm run dev), not on Vercel
+if (require.main === module) {
+  app.listen(PORT, () => console.log(`API running on http://localhost:${PORT}`));
+}
